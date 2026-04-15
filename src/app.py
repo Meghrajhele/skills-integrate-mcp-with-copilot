@@ -10,6 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import json
+from datetime import datetime, timedelta
+import secrets
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +21,16 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# In-memory session storage
+sessions = {}
+
+# Load teachers credentials from JSON
+def load_teachers():
+    teachers_file = Path(__file__).parent / "teachers.json"
+    with open(teachers_file, 'r') as f:
+        data = json.load(f)
+        return data.get("teachers", {})
 
 # In-memory activity database
 activities = {
@@ -110,9 +123,61 @@ def signup_for_activity(activity_name: str, email: str):
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
+@app.post("/login")
+def login(username: str, password: str):
+    """Teacher login endpoint"""
+    teachers = load_teachers()
+    
+    if username not in teachers or teachers[username] != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Generate a session token
+    token = secrets.token_urlsafe(32)
+    expiry = datetime.now() + timedelta(hours=8)
+    sessions[token] = {
+        "username": username,
+        "expiry": expiry
+    }
+    
+    return {"token": token, "username": username}
+
+
+@app.post("/logout")
+def logout(token: str):
+    """Teacher logout endpoint"""
+    if token in sessions:
+        del sessions[token]
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/verify")
+def verify_token(token: str):
+    """Verify if a token is valid"""
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    session = sessions[token]
+    if datetime.now() > session["expiry"]:
+        del sessions[token]
+        raise HTTPException(status_code=401, detail="Token expired")
+    
+    return {"valid": True, "username": session["username"]}
+
+
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, token: str = None):
+    """Unregister a student from an activity (teacher only)"""
+    # Check if teacher is logged in
+    if token:
+        if token not in sessions:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        session = sessions[token]
+        if datetime.now() > session["expiry"]:
+            del sessions[token]
+            raise HTTPException(status_code=401, detail="Token expired")
+    else:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
